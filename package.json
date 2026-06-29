@@ -1,0 +1,43 @@
+{
+    "name": "@thecyrilcril/mcp-config-builder",
+    "version": "1.0.0",
+    "description": "Build a project's .mcp.json from a committed placeholder template, injecting secrets from .env at build time — with a built-in leak guard that refuses to process a template containing raw secrets.",
+    "type": "module",
+    "license": "MIT",
+    "author": "thecyrilcril",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/thecyrilcril/mcp-config-builder.git"
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "main": "./src/index.js",
+    "exports": {
+        ".": "./src/index.js",
+        "./builder": "./src/lib/builder.js",
+        "./watcher": "./src/lib/watcher.js",
+        "./secrets": "./src/lib/secrets.js"
+    },
+    "bin": {
+        "mcp-build": "./src/bin/mcp-build.js",
+        "mcp-watch": "./src/bin/mcp-watch.js"
+    },
+    "files": [
+        "src",
+        "README.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "test": "node --test"
+    },
+    "keywords": [
+        "mcp",
+        "model-context-protocol",
+        "config",
+        "secrets",
+        "leak-prevention",
+        "dotenv",
+        "laravel"
+    ]
+}
