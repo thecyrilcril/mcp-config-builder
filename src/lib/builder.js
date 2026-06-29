@@ -38,7 +38,9 @@ class LeakGuardError extends Error {}
 export function processTemplate(config, environment, projectPath, logger = () => {}) {
     let json = JSON.stringify(config, null, 4)
 
-    json = json.replaceAll('PROJECT_PATH', projectPath)
+    // Whole-token replace so values like "PROJECT_PATH_ROOT" are not mangled.
+    // Use a function replacer so $-sequences in projectPath aren't interpreted.
+    json = json.replace(/\bPROJECT_PATH\b/g, () => projectPath)
 
     json = json.replace(/VITE_([A-Z0-9_]+)/g, (match, name) => {
         const value = environment[`VITE_${name}`]
@@ -63,7 +65,8 @@ export function processTemplate(config, environment, projectPath, logger = () =>
  */
 export function merge(existing, template, logger = () => {}) {
     const templateServers = Object.keys(template.mcpServers || {})
-    const result = { mcpServers: { ...template.mcpServers } }
+    // Preserve any top-level template keys (e.g. "$schema"), not just mcpServers.
+    const result = { ...template, mcpServers: { ...template.mcpServers } }
 
     if (existing?.mcpServers) {
         for (const [name, config] of Object.entries(existing.mcpServers)) {

@@ -59,6 +59,19 @@ describe('processTemplate', () => {
         const out = processTemplate(CLEAN_TEMPLATE, {}, '/p')
         assert.equal(out.mcpServers.context7.headers.CONTEXT7_API_KEY, 'VITE_CONTEXT7_API_KEY')
     })
+
+    test('PROJECT_PATH is a whole-token replace (does not mangle PROJECT_PATH_X)', () => {
+        const tpl = { mcpServers: { a: { command: 'x', args: ['PROJECT_PATH', 'PROJECT_PATH_ROOT'] } } }
+        const out = processTemplate(tpl, {}, '/home/u')
+        assert.equal(out.mcpServers.a.args[0], '/home/u')
+        assert.equal(out.mcpServers.a.args[1], 'PROJECT_PATH_ROOT')
+    })
+
+    test('a project path containing $ is inserted literally', () => {
+        const tpl = { mcpServers: { a: { command: 'x', args: ['PROJECT_PATH'] } } }
+        const out = processTemplate(tpl, {}, '/home/$user/app')
+        assert.equal(out.mcpServers.a.args[0], '/home/$user/app')
+    })
 })
 
 describe('merge', () => {
@@ -73,6 +86,12 @@ describe('merge', () => {
         const existing = { mcpServers: { a: { command: 'OLD' } } }
         const out = merge(existing, { mcpServers: { a: { command: 'NEW' } } })
         assert.equal(out.mcpServers.a.command, 'NEW')
+    })
+
+    test('preserves top-level template keys like $schema', () => {
+        const out = merge(null, { $schema: 'https://example/schema.json', mcpServers: { a: { command: 'php' } } })
+        assert.equal(out.$schema, 'https://example/schema.json')
+        assert.ok(out.mcpServers.a)
     })
 })
 
@@ -111,6 +130,14 @@ describe('leak guard', () => {
 
     test('findSecrets flags a ref.tools key', () => {
         assert.ok(findSecrets('ref-0000000000000000').length > 0)
+    })
+
+    test('findSecrets flags a modern OpenAI project key (sk-proj-)', () => {
+        assert.ok(findSecrets('sk-proj-0000000000000000000000000000').length > 0)
+    })
+
+    test('findSecrets flags a legacy OpenAI key (sk-)', () => {
+        assert.ok(findSecrets('sk-0000000000000000000000').length > 0)
     })
 
     test('findSecrets flags a long hex secret', () => {

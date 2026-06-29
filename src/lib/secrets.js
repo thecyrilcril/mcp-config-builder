@@ -2,9 +2,13 @@
  * Secret detection heuristics shared by the build-time leak guard.
  *
  * These patterns intentionally err toward the providers an MCP template is
- * likely to reference (Context7, Ref, Exa, generic long hex/base64 keys). The
+ * likely to reference (Context7, Ref, Exa, generic long hex/UUID keys). The
  * goal is to stop a *template* from being written or committed with a raw
  * secret in it — not to be a general-purpose scanner (gitleaks handles that).
+ *
+ * NOTE: this list is mirrored, of necessity, in two other runtimes —
+ * kitwire's `.githooks/pre-commit` (bash ERE) and `.gitleaks.toml` (TOML).
+ * Keep the three in sync; this file is the canonical source.
  */
 
 /**
@@ -15,7 +19,7 @@
 export const SECRET_PATTERNS = [
     { name: 'Context7 API key', regex: /ctx7sk-[A-Za-z0-9-]{8,}/ },
     { name: 'Ref.tools API key', regex: /\bref-[A-Za-z0-9]{16,}\b/ },
-    { name: 'OpenAI key', regex: /\bsk-[A-Za-z0-9]{20,}\b/ },
+    { name: 'OpenAI key', regex: /\bsk-[A-Za-z0-9_-]{20,}\b/ },
     { name: 'AWS access key id', regex: /\bAKIA[0-9A-Z]{16}\b/ },
     { name: 'Google API key', regex: /\bAIza[0-9A-Za-z_-]{35}\b/ },
     { name: 'GitHub token', regex: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/ },

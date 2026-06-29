@@ -73,7 +73,7 @@ Run `npm run dev` (or `npx mcp-build`) → `.mcp.json` is generated with real ke
 ## Leak guard
 
 Before processing, the builder scans the **template** for raw secrets (Context7,
-Ref, OpenAI, AWS, Google, GitHub, Slack tokens, long hex/base64/UUID values). If
+Ref, OpenAI, AWS, Google, GitHub, Slack tokens, long hex/UUID values). If
 any are found it **throws and writes nothing** — because the template is committed,
 a secret in it is a leak. Move the value to `.env`, replace it with its `VITE_*`
 placeholder, and rebuild. Matched secrets are redacted in error output.
