@@ -1,6 +1,6 @@
 import { test, describe, beforeEach, afterEach } from 'node:test'
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -330,6 +330,21 @@ describe('build (destructive-change safety)', () => {
         assert.equal(readFileSync(join(dir, '.mcp.json'), 'utf8'), before, 'output must be untouched')
     })
 
+    test('a refused build reports no removals it did not make', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        const messages = []
+        writeTpl({ mcpSevrers: CLEAN_TEMPLATE.mcpServers })
+        assert.throws(() => build({ cwd: dir, env: ENV, logger: (m) => messages.push(m) }))
+
+        assert.equal(
+            messages.filter((m) => m.includes('Removed server')).length,
+            0,
+            'the guard must fire before merge() logs deletions the build then refuses to make'
+        )
+    })
+
     test('refuses an explicitly emptied template', () => {
         writeTpl(CLEAN_TEMPLATE)
         build({ cwd: dir, env: ENV, logger: () => {} })
@@ -338,7 +353,7 @@ describe('build (destructive-change safety)', () => {
         assert.throws(() => build({ cwd: dir, env: ENV, logger: () => {} }), /Refusing to build/)
     })
 
-    test('a removal writes a non-rolling snapshot that survives later builds', () => {
+    test('the backup holds a removed key for exactly one write, as documented', () => {
         writeTpl(CLEAN_TEMPLATE)
         build({ cwd: dir, env: ENV, logger: () => {} })
 
@@ -347,30 +362,38 @@ describe('build (destructive-change safety)', () => {
         writeTpl(trimmed)
         build({ cwd: dir, env: ENV, logger: () => {} })
 
-        const snapshots = readdirSync(dir).filter((f) => f.startsWith('.mcp.json.removed-'))
-        assert.equal(snapshots.length, 1, 'exactly one snapshot for one removal build')
-        assert.match(readFileSync(join(dir, snapshots[0]), 'utf8'), /ctx7sk-real-key-value/)
+        // Immediately after the removal the key is still recoverable...
+        assert.match(readFileSync(join(dir, '.mcp.json.backup'), 'utf8'), /ctx7sk-real-key-value/)
 
-        // A later, unrelated write flushes the rolling backup — the snapshot must outlive it.
+        // ...but the next build that writes anything flushes the rolling slot. This is
+        // the documented limit of the safety net, pinned so the docs cannot drift from it.
         const edited = JSON.parse(JSON.stringify(trimmed))
         edited.mcpServers['laravel-boost'].args = ['artisan', 'boost:mcp', '--verbose']
         writeTpl(edited)
         build({ cwd: dir, env: ENV, logger: () => {} })
 
         assert.doesNotMatch(readFileSync(join(dir, '.mcp.json.backup'), 'utf8'), /ctx7sk-real-key-value/)
-        assert.match(readFileSync(join(dir, snapshots[0]), 'utf8'), /ctx7sk-real-key-value/)
     })
 
-    test('no snapshot is written when nothing was removed', () => {
+    test('a no-op build does not flush the backup', () => {
         writeTpl(CLEAN_TEMPLATE)
         build({ cwd: dir, env: ENV, logger: () => {} })
 
-        const edited = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
-        edited.mcpServers['laravel-boost'].args = ['artisan', 'boost:mcp', '--verbose']
-        writeTpl(edited)
+        const trimmed = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
+        delete trimmed.mcpServers.context7
+        writeTpl(trimmed)
         build({ cwd: dir, env: ENV, logger: () => {} })
 
-        assert.equal(readdirSync(dir).filter((f) => f.startsWith('.mcp.json.removed-')).length, 0)
+        assert.equal(build({ cwd: dir, env: ENV, logger: () => {} }).status, 'unchanged')
+        assert.match(readFileSync(join(dir, '.mcp.json.backup'), 'utf8'), /ctx7sk-real-key-value/)
+    })
+
+    test('a skipped build still reports the documented result shape', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        const res = build({ cwd: dir, env: { ...ENV, MCP_DYNAMIC: 'false' }, logger: () => {} })
+        assert.equal(res.status, 'skipped')
+        assert.deepEqual(res.removed, [], 'removed is always present, per BuildResult')
+        assert.ok(res.output, 'output is always present, per BuildResult')
     })
 
     test('build() reports removals in its return value', () => {

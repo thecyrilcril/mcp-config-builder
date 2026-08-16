@@ -15,8 +15,8 @@ import { findSecrets } from './secrets.js'
 /**
  * @typedef {Object} BuildResult
  * @property {'written'|'unchanged'|'skipped'} status
- * @property {string} [output] Absolute-ish path written.
- * @property {string[]} [removed] Servers dropped because the template no longer defines them.
+ * @property {string} output Absolute-ish path written.
+ * @property {string[]} removed Servers dropped because the template no longer defines them.
  */
 
 const DEFAULTS = {
@@ -159,15 +159,20 @@ export function assertTemplateHasNoSecrets(templateText) {
  * possible — delete `.mcp.json` by hand, or empty the template when the output
  * is already empty.
  *
+ * Call this *before* `merge()`: merge() logs each removal as it goes, and a refused
+ * build removes nothing, so guarding afterwards reports deletions that never happen.
+ * `incoming` is the processed template — `merge()` projects its servers verbatim, so
+ * the two agree on the resulting set.
+ *
  * @param {object|null} existing
- * @param {object} merged
+ * @param {object} incoming processed template (or the merged result — same server set)
  * @param {string} template template filename, for the error message
  */
-export function assertNotWipingEveryServer(existing, merged, template = DEFAULTS.template) {
+export function assertNotWipingEveryServer(existing, incoming, template = DEFAULTS.template) {
     const existingCount = Object.keys(existing?.mcpServers ?? {}).length
-    const mergedCount = Object.keys(merged.mcpServers ?? {}).length
+    const incomingCount = Object.keys(incoming.mcpServers ?? {}).length
 
-    if (existingCount > 0 && mergedCount === 0) {
+    if (existingCount > 0 && incomingCount === 0) {
         throw new Error(
             `Refusing to build: "${template}" defines no MCP servers, which would remove all ` +
             `${existingCount} server(s) from the generated config. This is usually a typo'd or ` +
@@ -240,7 +245,7 @@ export function build(options = {}) {
 
     if (env.MCP_DYNAMIC === 'false') {
         log('⏭️  MCP_DYNAMIC=false — skipping generation')
-        return { status: 'skipped' }
+        return { status: 'skipped', output: path(output), removed: [] }
     }
 
     if (!existsSync(path(template))) {
@@ -263,9 +268,12 @@ export function build(options = {}) {
         ? JSON.parse(readFileSync(path(output), 'utf8'))
         : null
 
+    // Guard before merge(): merge() logs each removal as it goes, and a refused build
+    // removes nothing — reporting deletions it then declines to make is misleading.
+    assertNotWipingEveryServer(existing, processed, template)
+
     const merged = merge(existing, processed, log)
     validate(merged)
-    assertNotWipingEveryServer(existing, merged, template)
 
     if (isEqual(existing, merged)) {
         log('✅ No changes')
@@ -275,16 +283,6 @@ export function build(options = {}) {
     const removed = removedServers(existing, processed)
 
     if (existsSync(path(output))) {
-        // `.mcp.json.backup` is a single rolling slot: the next write overwrites it.
-        // That is fine for an edit, but a removal is the one case where the previous
-        // contents are irreplaceable — the dropped server and its injected secret
-        // exist nowhere else. Snapshot those to a distinct, non-rolling file first.
-        if (removed.length > 0) {
-            const snapshot = `${output}.removed-${Date.now()}`
-            copyFileSync(path(output), path(snapshot))
-            log(`🧷 Saved pre-removal snapshot: ${snapshot}`)
-        }
-
         copyFileSync(path(output), path(backup))
     }
 
