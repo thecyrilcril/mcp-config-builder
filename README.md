@@ -54,11 +54,13 @@ Put the real values in `.env` (git-ignored):
 VITE_CONTEXT7_API_KEY=ctx7sk-your-real-key
 ```
 
-Git-ignore the generated output and backup:
+Git-ignore the generated output, its backup, and any pre-removal snapshots — all
+three hold real injected keys:
 
 ```gitignore
 .mcp.json
 .mcp.json.backup
+.mcp.json.removed-*
 ```
 
 Run `npm run dev` (or `npx mcp-build`) → `.mcp.json` is generated with real keys.
@@ -90,7 +92,11 @@ Disable per build (not recommended) via the library: `build({ guard: false })`.
   > a server that isn't committed, put it in the template and supply its value from
   > `.env`, or configure it in your MCP client outside this project.
 - **Idempotent**: no write when the result is unchanged (key-order-independent).
-- **Safe writes**: backs up to `.mcp.json.backup` and restores on write failure.
+- **Safe writes**: backs up to `.mcp.json.backup` and restores on write failure. A build
+  that removes servers also writes a non-rolling `.mcp.json.removed-<timestamp>` snapshot
+  first, so a dropped server's injected secret stays recoverable after later builds.
+- **Refuses a total wipe**: a template that defines no servers (usually a typo'd or missing
+  `mcpServers` key) throws instead of emptying a populated `.mcp.json`.
 - **Opt-out**: `MCP_DYNAMIC=false` skips generation entirely.
 
 ## Library API
@@ -98,7 +104,7 @@ Disable per build (not recommended) via the library: `build({ guard: false })`.
 ```js
 import { build, watchTemplate, findSecrets } from '@thecyrilcril/mcp-config-builder'
 
-const result = build({ cwd: process.cwd(), guard: true }) // { status: 'written' | 'unchanged' | 'skipped' }
+const result = build({ cwd: process.cwd(), guard: true }) // { status: 'written' | 'unchanged' | 'skipped', output, removed: string[] }
 const stop = watchTemplate({ debounceMs: 500 })
 const findings = findSecrets(someText) // [{ name, match }]
 ```

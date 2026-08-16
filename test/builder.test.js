@@ -1,6 +1,6 @@
 import { test, describe, beforeEach, afterEach } from 'node:test'
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -8,7 +8,9 @@ import {
     build,
     processTemplate,
     merge,
+    removedServers,
     validate,
+    assertNotWipingEveryServer,
     isEqual,
     assertTemplateHasNoSecrets,
     LeakGuardError,
@@ -87,7 +89,9 @@ describe('merge', () => {
         const existing = { mcpServers: { gone: { command: 'node' }, a: { command: 'php' } } }
         merge(existing, { mcpServers: { a: { command: 'php' } } }, (m) => messages.push(m))
         assert.equal(messages.length, 1)
-        assert.match(messages[0], /gone/)
+        // Assert the removal wording, not just the name: the pre-2.0 code logged
+        // "Preserved custom server: gone", which also matched a bare /gone/.
+        assert.match(messages[0], /Removed server absent from template: gone/)
     })
 
     test('result contains exactly the template servers', () => {
@@ -263,5 +267,122 @@ describe('build (integration)', () => {
 
         const after = readFileSync(join(dir, '.mcp.json'), 'utf8')
         assert.doesNotMatch(after, /ctx7sk-real-key-value/, 'stale key must not survive removal')
+    })
+})
+
+describe('removedServers', () => {
+    test('lists servers absent from the template', () => {
+        const existing = { mcpServers: { a: { command: 'x' }, gone: { command: 'y' } } }
+        assert.deepEqual(removedServers(existing, { mcpServers: { a: { command: 'x' } } }), ['gone'])
+    })
+
+    test('is empty when nothing was removed', () => {
+        const existing = { mcpServers: { a: { command: 'x' } } }
+        assert.deepEqual(removedServers(existing, { mcpServers: { a: { command: 'x' } } }), [])
+    })
+
+    test('is empty when there is no existing config', () => {
+        assert.deepEqual(removedServers(null, { mcpServers: { a: { command: 'x' } } }), [])
+    })
+})
+
+describe('assertNotWipingEveryServer', () => {
+    test('throws when a non-empty config would be emptied', () => {
+        const existing = { mcpServers: { a: { command: 'x' } } }
+        assert.throws(() => assertNotWipingEveryServer(existing, { mcpServers: {} }), /Refusing to build/)
+    })
+
+    test('allows a partial removal', () => {
+        const existing = { mcpServers: { a: { command: 'x' }, b: { command: 'y' } } }
+        assertNotWipingEveryServer(existing, { mcpServers: { a: { command: 'x' } } })
+    })
+
+    test('allows an empty result when there was nothing to lose', () => {
+        assertNotWipingEveryServer(null, { mcpServers: {} })
+        assertNotWipingEveryServer({ mcpServers: {} }, { mcpServers: {} })
+    })
+})
+
+describe('build (destructive-change safety)', () => {
+    let dir
+
+    beforeEach(() => {
+        dir = mkdtempSync(join(tmpdir(), 'mcp-builder-safety-'))
+    })
+
+    afterEach(() => {
+        rmSync(dir, { recursive: true, force: true })
+    })
+
+    const writeTpl = (obj) =>
+        writeFileSync(join(dir, '.mcp.json.template'), JSON.stringify(obj, null, 4))
+
+    const ENV = { VITE_CONTEXT7_API_KEY: 'ctx7sk-real-key-value' }
+
+    test('refuses a template whose mcpServers key is typo\'d, leaving the output intact', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+        const before = readFileSync(join(dir, '.mcp.json'), 'utf8')
+
+        writeTpl({ mcpSevrers: CLEAN_TEMPLATE.mcpServers })
+        assert.throws(() => build({ cwd: dir, env: ENV, logger: () => {} }), /Refusing to build/)
+
+        assert.equal(readFileSync(join(dir, '.mcp.json'), 'utf8'), before, 'output must be untouched')
+    })
+
+    test('refuses an explicitly emptied template', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        writeTpl({ mcpServers: {} })
+        assert.throws(() => build({ cwd: dir, env: ENV, logger: () => {} }), /Refusing to build/)
+    })
+
+    test('a removal writes a non-rolling snapshot that survives later builds', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        const trimmed = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
+        delete trimmed.mcpServers.context7
+        writeTpl(trimmed)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        const snapshots = readdirSync(dir).filter((f) => f.startsWith('.mcp.json.removed-'))
+        assert.equal(snapshots.length, 1, 'exactly one snapshot for one removal build')
+        assert.match(readFileSync(join(dir, snapshots[0]), 'utf8'), /ctx7sk-real-key-value/)
+
+        // A later, unrelated write flushes the rolling backup — the snapshot must outlive it.
+        const edited = JSON.parse(JSON.stringify(trimmed))
+        edited.mcpServers['laravel-boost'].args = ['artisan', 'boost:mcp', '--verbose']
+        writeTpl(edited)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        assert.doesNotMatch(readFileSync(join(dir, '.mcp.json.backup'), 'utf8'), /ctx7sk-real-key-value/)
+        assert.match(readFileSync(join(dir, snapshots[0]), 'utf8'), /ctx7sk-real-key-value/)
+    })
+
+    test('no snapshot is written when nothing was removed', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        const edited = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
+        edited.mcpServers['laravel-boost'].args = ['artisan', 'boost:mcp', '--verbose']
+        writeTpl(edited)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        assert.equal(readdirSync(dir).filter((f) => f.startsWith('.mcp.json.removed-')).length, 0)
+    })
+
+    test('build() reports removals in its return value', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        assert.deepEqual(build({ cwd: dir, env: ENV, logger: () => {} }).removed, [])
+
+        const trimmed = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
+        delete trimmed.mcpServers.context7
+        writeTpl(trimmed)
+
+        const res = build({ cwd: dir, env: ENV, logger: () => {} })
+        assert.equal(res.status, 'written')
+        assert.deepEqual(res.removed, ['context7'], 'removals must be inspectable without scraping logs')
     })
 })

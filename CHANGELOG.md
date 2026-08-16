@@ -5,7 +5,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0]
+## [2.0.0] - 2026-08-16
+
+### Added
+
+- Pre-removal snapshots. A build that drops servers first copies the previous config
+  to a non-rolling `.mcp.json.removed-<timestamp>` file and logs its path, so a removed
+  server's injected secret survives later builds (`.mcp.json.backup` is a single rolling
+  slot the next write overwrites). Git-ignore `.mcp.json.removed-*` — it holds real keys.
+- A guard against total wipes: a template defining no servers now throws rather than
+  emptying a populated `.mcp.json`. Because `merge()` spreads `template.mcpServers`
+  unconditionally, a typo'd or missing key arrives as `{}` and previously wrote through
+  as "remove everything" — harmless in 1.x, where servers were copied back.
+- `build()` returns `removed: string[]`, and a new `removedServers(existing, template)`
+  export reports the same set, so callers can react to deletions without scraping logs.
 
 ### Changed
 
@@ -52,8 +65,11 @@ origin the builder has to infer.
 If you relied on merge-preserving to run a machine-specific server, move it into
 `.mcp.json.template` and supply its value from `.env` via a `VITE_*` placeholder,
 or configure it in your MCP client outside the project. Anything left only in
-`.mcp.json` is removed on the next build; the existing `.mcp.json.backup` holds the
-previous contents if you need to recover an entry.
+`.mcp.json` is removed on the next build. When a build removes servers it first
+writes a `.mcp.json.removed-<timestamp>` snapshot of the pre-removal config and logs
+its path, so a dropped server and its injected secret stay recoverable. (Do not rely
+on `.mcp.json.backup` for this — it is a single rolling slot that the next write
+overwrites.)
 
 An alternative design — recording which servers the builder itself generated, so
 hand-added ones could still be preserved — was considered and set aside. It kept
@@ -61,7 +77,7 @@ the preserve feature at the cost of metadata in the output, a migration step for
 the first build after upgrading, and a fallback path when that record was missing
 or malformed. Mirroring the template needs none of that.
 
-## [1.0.0]
+## [1.0.0] - 2026-06-29
 
 ### Added
 

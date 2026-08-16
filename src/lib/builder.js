@@ -16,6 +16,7 @@ import { findSecrets } from './secrets.js'
  * @typedef {Object} BuildResult
  * @property {'written'|'unchanged'|'skipped'} status
  * @property {string} [output] Absolute-ish path written.
+ * @property {string[]} [removed] Servers dropped because the template no longer defines them.
  */
 
 const DEFAULTS = {
@@ -89,6 +90,22 @@ export function merge(existing, template, logger = () => {}) {
 }
 
 /**
+ * Names of servers present in `existing` but not in `template`.
+ *
+ * The same set `merge()` reports through its logger, returned as data so callers
+ * can react to deletions without scraping log text.
+ *
+ * @param {object|null} existing
+ * @param {object} template
+ * @returns {string[]}
+ */
+export function removedServers(existing, template) {
+    const templateServers = Object.keys(template.mcpServers || {})
+
+    return Object.keys(existing?.mcpServers ?? {}).filter((name) => !templateServers.includes(name))
+}
+
+/**
  * Validate the merged config shape before writing.
  *
  * @param {object} config
@@ -128,6 +145,36 @@ export function assertTemplateHasNoSecrets(templateText) {
         'VITE_* placeholders (e.g. "CONTEXT7_API_KEY": "VITE_CONTEXT7_API_KEY"). ' +
         'Move the value to .env, replace it with its placeholder, and rebuild.'
     )
+}
+
+/**
+ * Refuse a build that would remove every server from a non-empty config.
+ *
+ * The template is the source of truth, so removals are expected and allowed —
+ * but wiping *everything* is far more often a malformed template (a typo'd or
+ * missing `mcpServers` key, an accidentally emptied block) than a real intent.
+ * `merge()` spreads `template.mcpServers` unconditionally, so an absent key
+ * arrives here as `{}` and is indistinguishable from an explicitly empty one;
+ * both are treated as suspect. Removing the last server deliberately is still
+ * possible — delete `.mcp.json` by hand, or empty the template when the output
+ * is already empty.
+ *
+ * @param {object|null} existing
+ * @param {object} merged
+ * @param {string} template template filename, for the error message
+ */
+export function assertNotWipingEveryServer(existing, merged, template = DEFAULTS.template) {
+    const existingCount = Object.keys(existing?.mcpServers ?? {}).length
+    const mergedCount = Object.keys(merged.mcpServers ?? {}).length
+
+    if (existingCount > 0 && mergedCount === 0) {
+        throw new Error(
+            `Refusing to build: "${template}" defines no MCP servers, which would remove all ` +
+            `${existingCount} server(s) from the generated config. This is usually a typo'd or ` +
+            `missing "mcpServers" key in the template. If you really mean to remove every server, ` +
+            `delete the generated file by hand.`
+        )
+    }
 }
 
 /**
@@ -218,13 +265,26 @@ export function build(options = {}) {
 
     const merged = merge(existing, processed, log)
     validate(merged)
+    assertNotWipingEveryServer(existing, merged, template)
 
     if (isEqual(existing, merged)) {
         log('✅ No changes')
-        return { status: 'unchanged', output: path(output) }
+        return { status: 'unchanged', output: path(output), removed: [] }
     }
 
+    const removed = removedServers(existing, processed)
+
     if (existsSync(path(output))) {
+        // `.mcp.json.backup` is a single rolling slot: the next write overwrites it.
+        // That is fine for an edit, but a removal is the one case where the previous
+        // contents are irreplaceable — the dropped server and its injected secret
+        // exist nowhere else. Snapshot those to a distinct, non-rolling file first.
+        if (removed.length > 0) {
+            const snapshot = `${output}.removed-${Date.now()}`
+            copyFileSync(path(output), path(snapshot))
+            log(`🧷 Saved pre-removal snapshot: ${snapshot}`)
+        }
+
         copyFileSync(path(output), path(backup))
     }
 
@@ -239,7 +299,7 @@ export function build(options = {}) {
     }
 
     log(`✅ Updated ${output}`)
-    return { status: 'written', output: path(output) }
+    return { status: 'written', output: path(output), removed }
 }
 
 export { LeakGuardError, DEFAULTS }
