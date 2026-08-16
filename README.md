@@ -82,8 +82,13 @@ Disable per build (not recommended) via the library: `build({ guard: false })`.
 
 ## Behavior
 
-- **Merge-preserving**: servers you add to `.mcp.json` that aren't in the template
-  are kept across rebuilds.
+- **Template is the source of truth**: `.mcp.json` mirrors `.mcp.json.template`
+  exactly. Additions, edits and removals all propagate — delete a server block from
+  the template and the next build removes it from `.mcp.json`, along with the key
+  that was injected into it.
+  > Anything added directly to `.mcp.json` is overwritten on the next build. To run
+  > a server that isn't committed, put it in the template and supply its value from
+  > `.env`, or configure it in your MCP client outside this project.
 - **Idempotent**: no write when the result is unchanged (key-order-independent).
 - **Safe writes**: backs up to `.mcp.json.backup` and restores on write failure.
 - **Opt-out**: `MCP_DYNAMIC=false` skips generation entirely.

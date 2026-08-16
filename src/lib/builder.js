@@ -55,8 +55,17 @@ export function processTemplate(config, environment, projectPath, logger = () =>
 }
 
 /**
- * Merge a freshly-processed template over an existing config, preserving any
- * servers the user added that the template does not define.
+ * Resolve the config to write from a freshly-processed template.
+ *
+ * The template is the single source of truth: additions, edits and removals in
+ * `.mcp.json.template` all propagate to the output. A server absent from the
+ * template is absent from the result, so deleting a block from the template
+ * deletes it from `.mcp.json` on the next build.
+ *
+ * `existing` is accepted only so removals can be reported; it never contributes
+ * servers to the result. To run a machine-specific server that is not committed,
+ * add it to the template and gate it with an env placeholder, or configure it in
+ * your MCP client outside this project.
  *
  * @param {object|null} existing
  * @param {object} template
@@ -69,10 +78,9 @@ export function merge(existing, template, logger = () => {}) {
     const result = { ...template, mcpServers: { ...template.mcpServers } }
 
     if (existing?.mcpServers) {
-        for (const [name, config] of Object.entries(existing.mcpServers)) {
+        for (const name of Object.keys(existing.mcpServers)) {
             if (!templateServers.includes(name)) {
-                result.mcpServers[name] = config
-                logger(`🔧 Preserved custom server: ${name}`)
+                logger(`🗑️  Removed server absent from template: ${name}`)
             }
         }
     }

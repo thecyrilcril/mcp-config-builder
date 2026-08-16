@@ -75,11 +75,25 @@ describe('processTemplate', () => {
 })
 
 describe('merge', () => {
-    test('preserves custom servers absent from template', () => {
+    test('drops servers absent from the template', () => {
         const existing = { mcpServers: { custom: { command: 'node', args: ['x.js'] } } }
         const out = merge(existing, { mcpServers: { a: { command: 'php' } } })
-        assert.ok(out.mcpServers.custom)
+        assert.equal(out.mcpServers.custom, undefined, 'template is the source of truth')
         assert.ok(out.mcpServers.a)
+    })
+
+    test('logs each server it removes', () => {
+        const messages = []
+        const existing = { mcpServers: { gone: { command: 'node' }, a: { command: 'php' } } }
+        merge(existing, { mcpServers: { a: { command: 'php' } } }, (m) => messages.push(m))
+        assert.equal(messages.length, 1)
+        assert.match(messages[0], /gone/)
+    })
+
+    test('result contains exactly the template servers', () => {
+        const existing = { mcpServers: { old1: { command: 'x' }, old2: { command: 'y' } } }
+        const out = merge(existing, { mcpServers: { a: { command: 'php' }, b: { type: 'http' } } })
+        assert.deepEqual(Object.keys(out.mcpServers).sort(), ['a', 'b'])
     })
 
     test('template wins for overlapping server names', () => {
@@ -202,7 +216,7 @@ describe('build (integration)', () => {
         assert.throws(() => build({ cwd: dir, env: {}, logger: () => {} }), /not found/)
     })
 
-    test('preserves a user-added custom server across rebuilds', () => {
+    test('drops a hand-added server not present in the template', () => {
         writeTemplate(CLEAN_TEMPLATE)
         const env = { VITE_CONTEXT7_API_KEY: 'ctx7sk-real-key-value' }
         build({ cwd: dir, env, logger: () => {} })
@@ -213,6 +227,41 @@ describe('build (integration)', () => {
 
         build({ cwd: dir, env, logger: () => {} })
         const after = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'))
-        assert.ok(after.mcpServers.myCustom, 'custom server must survive rebuild')
+        assert.equal(after.mcpServers.myCustom, undefined, 'template is the source of truth')
+    })
+
+    test('removing a server from the template removes it from the output', () => {
+        writeTemplate(CLEAN_TEMPLATE)
+        const env = { VITE_CONTEXT7_API_KEY: 'ctx7sk-real-key-value' }
+        build({ cwd: dir, env, logger: () => {} })
+
+        const before = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'))
+        assert.ok(before.mcpServers.context7, 'precondition: server is present')
+
+        const trimmed = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
+        delete trimmed.mcpServers.context7
+        writeTemplate(trimmed)
+
+        const res = build({ cwd: dir, env, logger: () => {} })
+        assert.equal(res.status, 'written', 'a removal is a change, not a no-op')
+
+        const after = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'))
+        assert.equal(after.mcpServers.context7, undefined)
+        assert.deepEqual(Object.keys(after.mcpServers).sort(), ['herd', 'laravel-boost'])
+    })
+
+    test('a removed server takes its injected secret with it', () => {
+        writeTemplate(CLEAN_TEMPLATE)
+        const env = { VITE_CONTEXT7_API_KEY: 'ctx7sk-real-key-value' }
+        build({ cwd: dir, env, logger: () => {} })
+        assert.match(readFileSync(join(dir, '.mcp.json'), 'utf8'), /ctx7sk-real-key-value/)
+
+        const trimmed = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
+        delete trimmed.mcpServers.context7
+        writeTemplate(trimmed)
+        build({ cwd: dir, env, logger: () => {} })
+
+        const after = readFileSync(join(dir, '.mcp.json'), 'utf8')
+        assert.doesNotMatch(after, /ctx7sk-real-key-value/, 'stale key must not survive removal')
     })
 })
