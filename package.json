@@ -1,6 +1,6 @@
 {
     "name": "@thecyrilcril/mcp-config-builder",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "description": "Build a project's .mcp.json from a committed placeholder template, injecting secrets from .env at build time — with a built-in leak guard that refuses to process a template containing raw secrets.",
     "type": "module",
     "license": "MIT",
@@ -26,6 +26,7 @@
     "files": [
         "src",
         "README.md",
+        "CHANGELOG.md",
         "LICENSE"
     ],
     "scripts": {

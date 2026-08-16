@@ -15,7 +15,8 @@ import { findSecrets } from './secrets.js'
 /**
  * @typedef {Object} BuildResult
  * @property {'written'|'unchanged'|'skipped'} status
- * @property {string} [output] Absolute-ish path written.
+ * @property {string} output Absolute-ish path written.
+ * @property {string[]} removed Servers dropped because the template no longer defines them.
  */
 
 const DEFAULTS = {
@@ -55,8 +56,17 @@ export function processTemplate(config, environment, projectPath, logger = () =>
 }
 
 /**
- * Merge a freshly-processed template over an existing config, preserving any
- * servers the user added that the template does not define.
+ * Resolve the config to write from a freshly-processed template.
+ *
+ * The template is the single source of truth: additions, edits and removals in
+ * `.mcp.json.template` all propagate to the output. A server absent from the
+ * template is absent from the result, so deleting a block from the template
+ * deletes it from `.mcp.json` on the next build.
+ *
+ * `existing` is accepted only so removals can be reported; it never contributes
+ * servers to the result. To run a machine-specific server that is not committed,
+ * add it to the template and gate it with an env placeholder, or configure it in
+ * your MCP client outside this project.
  *
  * @param {object|null} existing
  * @param {object} template
@@ -69,15 +79,30 @@ export function merge(existing, template, logger = () => {}) {
     const result = { ...template, mcpServers: { ...template.mcpServers } }
 
     if (existing?.mcpServers) {
-        for (const [name, config] of Object.entries(existing.mcpServers)) {
+        for (const name of Object.keys(existing.mcpServers)) {
             if (!templateServers.includes(name)) {
-                result.mcpServers[name] = config
-                logger(`🔧 Preserved custom server: ${name}`)
+                logger(`🗑️  Removed server absent from template: ${name}`)
             }
         }
     }
 
     return result
+}
+
+/**
+ * Names of servers present in `existing` but not in `template`.
+ *
+ * The same set `merge()` reports through its logger, returned as data so callers
+ * can react to deletions without scraping log text.
+ *
+ * @param {object|null} existing
+ * @param {object} template
+ * @returns {string[]}
+ */
+export function removedServers(existing, template) {
+    const templateServers = Object.keys(template.mcpServers || {})
+
+    return Object.keys(existing?.mcpServers ?? {}).filter((name) => !templateServers.includes(name))
 }
 
 /**
@@ -120,6 +145,41 @@ export function assertTemplateHasNoSecrets(templateText) {
         'VITE_* placeholders (e.g. "CONTEXT7_API_KEY": "VITE_CONTEXT7_API_KEY"). ' +
         'Move the value to .env, replace it with its placeholder, and rebuild.'
     )
+}
+
+/**
+ * Refuse a build that would remove every server from a non-empty config.
+ *
+ * The template is the source of truth, so removals are expected and allowed —
+ * but wiping *everything* is far more often a malformed template (a typo'd or
+ * missing `mcpServers` key, an accidentally emptied block) than a real intent.
+ * `merge()` spreads `template.mcpServers` unconditionally, so an absent key
+ * arrives here as `{}` and is indistinguishable from an explicitly empty one;
+ * both are treated as suspect. Removing the last server deliberately is still
+ * possible — delete `.mcp.json` by hand, or empty the template when the output
+ * is already empty.
+ *
+ * Call this *before* `merge()`: merge() logs each removal as it goes, and a refused
+ * build removes nothing, so guarding afterwards reports deletions that never happen.
+ * `incoming` is the processed template — `merge()` projects its servers verbatim, so
+ * the two agree on the resulting set.
+ *
+ * @param {object|null} existing
+ * @param {object} incoming processed template (or the merged result — same server set)
+ * @param {string} template template filename, for the error message
+ */
+export function assertNotWipingEveryServer(existing, incoming, template = DEFAULTS.template) {
+    const existingCount = Object.keys(existing?.mcpServers ?? {}).length
+    const incomingCount = Object.keys(incoming.mcpServers ?? {}).length
+
+    if (existingCount > 0 && incomingCount === 0) {
+        throw new Error(
+            `Refusing to build: "${template}" defines no MCP servers, which would remove all ` +
+            `${existingCount} server(s) from the generated config. This is usually a typo'd or ` +
+            `missing "mcpServers" key in the template. If you really mean to remove every server, ` +
+            `delete the generated file by hand.`
+        )
+    }
 }
 
 /**
@@ -185,7 +245,7 @@ export function build(options = {}) {
 
     if (env.MCP_DYNAMIC === 'false') {
         log('⏭️  MCP_DYNAMIC=false — skipping generation')
-        return { status: 'skipped' }
+        return { status: 'skipped', output: path(output), removed: [] }
     }
 
     if (!existsSync(path(template))) {
@@ -208,13 +268,19 @@ export function build(options = {}) {
         ? JSON.parse(readFileSync(path(output), 'utf8'))
         : null
 
+    // Guard before merge(): merge() logs each removal as it goes, and a refused build
+    // removes nothing — reporting deletions it then declines to make is misleading.
+    assertNotWipingEveryServer(existing, processed, template)
+
     const merged = merge(existing, processed, log)
     validate(merged)
 
     if (isEqual(existing, merged)) {
         log('✅ No changes')
-        return { status: 'unchanged', output: path(output) }
+        return { status: 'unchanged', output: path(output), removed: [] }
     }
+
+    const removed = removedServers(existing, processed)
 
     if (existsSync(path(output))) {
         copyFileSync(path(output), path(backup))
@@ -231,7 +297,7 @@ export function build(options = {}) {
     }
 
     log(`✅ Updated ${output}`)
-    return { status: 'written', output: path(output) }
+    return { status: 'written', output: path(output), removed }
 }
 
 export { LeakGuardError, DEFAULTS }

@@ -82,10 +82,19 @@ Disable per build (not recommended) via the library: `build({ guard: false })`.
 
 ## Behavior
 
-- **Merge-preserving**: servers you add to `.mcp.json` that aren't in the template
-  are kept across rebuilds.
+- **Template is the source of truth**: `.mcp.json` mirrors `.mcp.json.template`
+  exactly. Additions, edits and removals all propagate — delete a server block from
+  the template and the next build removes it from `.mcp.json`, along with the key
+  that was injected into it.
+  > Anything added directly to `.mcp.json` is overwritten on the next build. To run
+  > a server that isn't committed, put it in the template and supply its value from
+  > `.env`, or configure it in your MCP client outside this project.
 - **Idempotent**: no write when the result is unchanged (key-order-independent).
-- **Safe writes**: backs up to `.mcp.json.backup` and restores on write failure.
+- **Safe writes**: backs up to `.mcp.json.backup` and restores on write failure. The backup
+  is a single rolling slot — the next write overwrites it — so copy it out promptly if you
+  need to recover a removed server's key.
+- **Refuses a total wipe**: a template that defines no servers (usually a typo'd or missing
+  `mcpServers` key) throws instead of emptying a populated `.mcp.json`.
 - **Opt-out**: `MCP_DYNAMIC=false` skips generation entirely.
 
 ## Library API
@@ -93,7 +102,7 @@ Disable per build (not recommended) via the library: `build({ guard: false })`.
 ```js
 import { build, watchTemplate, findSecrets } from '@thecyrilcril/mcp-config-builder'
 
-const result = build({ cwd: process.cwd(), guard: true }) // { status: 'written' | 'unchanged' | 'skipped' }
+const result = build({ cwd: process.cwd(), guard: true }) // { status: 'written' | 'unchanged' | 'skipped', output, removed: string[] }
 const stop = watchTemplate({ debounceMs: 500 })
 const findings = findSecrets(someText) // [{ name, match }]
 ```

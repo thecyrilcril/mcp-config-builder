@@ -8,7 +8,9 @@ import {
     build,
     processTemplate,
     merge,
+    removedServers,
     validate,
+    assertNotWipingEveryServer,
     isEqual,
     assertTemplateHasNoSecrets,
     LeakGuardError,
@@ -75,11 +77,27 @@ describe('processTemplate', () => {
 })
 
 describe('merge', () => {
-    test('preserves custom servers absent from template', () => {
+    test('drops servers absent from the template', () => {
         const existing = { mcpServers: { custom: { command: 'node', args: ['x.js'] } } }
         const out = merge(existing, { mcpServers: { a: { command: 'php' } } })
-        assert.ok(out.mcpServers.custom)
+        assert.equal(out.mcpServers.custom, undefined, 'template is the source of truth')
         assert.ok(out.mcpServers.a)
+    })
+
+    test('logs each server it removes', () => {
+        const messages = []
+        const existing = { mcpServers: { gone: { command: 'node' }, a: { command: 'php' } } }
+        merge(existing, { mcpServers: { a: { command: 'php' } } }, (m) => messages.push(m))
+        assert.equal(messages.length, 1)
+        // Assert the removal wording, not just the name: the pre-2.0 code logged
+        // "Preserved custom server: gone", which also matched a bare /gone/.
+        assert.match(messages[0], /Removed server absent from template: gone/)
+    })
+
+    test('result contains exactly the template servers', () => {
+        const existing = { mcpServers: { old1: { command: 'x' }, old2: { command: 'y' } } }
+        const out = merge(existing, { mcpServers: { a: { command: 'php' }, b: { type: 'http' } } })
+        assert.deepEqual(Object.keys(out.mcpServers).sort(), ['a', 'b'])
     })
 
     test('template wins for overlapping server names', () => {
@@ -202,7 +220,7 @@ describe('build (integration)', () => {
         assert.throws(() => build({ cwd: dir, env: {}, logger: () => {} }), /not found/)
     })
 
-    test('preserves a user-added custom server across rebuilds', () => {
+    test('drops a hand-added server not present in the template', () => {
         writeTemplate(CLEAN_TEMPLATE)
         const env = { VITE_CONTEXT7_API_KEY: 'ctx7sk-real-key-value' }
         build({ cwd: dir, env, logger: () => {} })
@@ -213,6 +231,181 @@ describe('build (integration)', () => {
 
         build({ cwd: dir, env, logger: () => {} })
         const after = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'))
-        assert.ok(after.mcpServers.myCustom, 'custom server must survive rebuild')
+        assert.equal(after.mcpServers.myCustom, undefined, 'template is the source of truth')
+    })
+
+    test('removing a server from the template removes it from the output', () => {
+        writeTemplate(CLEAN_TEMPLATE)
+        const env = { VITE_CONTEXT7_API_KEY: 'ctx7sk-real-key-value' }
+        build({ cwd: dir, env, logger: () => {} })
+
+        const before = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'))
+        assert.ok(before.mcpServers.context7, 'precondition: server is present')
+
+        const trimmed = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
+        delete trimmed.mcpServers.context7
+        writeTemplate(trimmed)
+
+        const res = build({ cwd: dir, env, logger: () => {} })
+        assert.equal(res.status, 'written', 'a removal is a change, not a no-op')
+
+        const after = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'))
+        assert.equal(after.mcpServers.context7, undefined)
+        assert.deepEqual(Object.keys(after.mcpServers).sort(), ['herd', 'laravel-boost'])
+    })
+
+    test('a removed server takes its injected secret with it', () => {
+        writeTemplate(CLEAN_TEMPLATE)
+        const env = { VITE_CONTEXT7_API_KEY: 'ctx7sk-real-key-value' }
+        build({ cwd: dir, env, logger: () => {} })
+        assert.match(readFileSync(join(dir, '.mcp.json'), 'utf8'), /ctx7sk-real-key-value/)
+
+        const trimmed = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
+        delete trimmed.mcpServers.context7
+        writeTemplate(trimmed)
+        build({ cwd: dir, env, logger: () => {} })
+
+        const after = readFileSync(join(dir, '.mcp.json'), 'utf8')
+        assert.doesNotMatch(after, /ctx7sk-real-key-value/, 'stale key must not survive removal')
+    })
+})
+
+describe('removedServers', () => {
+    test('lists servers absent from the template', () => {
+        const existing = { mcpServers: { a: { command: 'x' }, gone: { command: 'y' } } }
+        assert.deepEqual(removedServers(existing, { mcpServers: { a: { command: 'x' } } }), ['gone'])
+    })
+
+    test('is empty when nothing was removed', () => {
+        const existing = { mcpServers: { a: { command: 'x' } } }
+        assert.deepEqual(removedServers(existing, { mcpServers: { a: { command: 'x' } } }), [])
+    })
+
+    test('is empty when there is no existing config', () => {
+        assert.deepEqual(removedServers(null, { mcpServers: { a: { command: 'x' } } }), [])
+    })
+})
+
+describe('assertNotWipingEveryServer', () => {
+    test('throws when a non-empty config would be emptied', () => {
+        const existing = { mcpServers: { a: { command: 'x' } } }
+        assert.throws(() => assertNotWipingEveryServer(existing, { mcpServers: {} }), /Refusing to build/)
+    })
+
+    test('allows a partial removal', () => {
+        const existing = { mcpServers: { a: { command: 'x' }, b: { command: 'y' } } }
+        assertNotWipingEveryServer(existing, { mcpServers: { a: { command: 'x' } } })
+    })
+
+    test('allows an empty result when there was nothing to lose', () => {
+        assertNotWipingEveryServer(null, { mcpServers: {} })
+        assertNotWipingEveryServer({ mcpServers: {} }, { mcpServers: {} })
+    })
+})
+
+describe('build (destructive-change safety)', () => {
+    let dir
+
+    beforeEach(() => {
+        dir = mkdtempSync(join(tmpdir(), 'mcp-builder-safety-'))
+    })
+
+    afterEach(() => {
+        rmSync(dir, { recursive: true, force: true })
+    })
+
+    const writeTpl = (obj) =>
+        writeFileSync(join(dir, '.mcp.json.template'), JSON.stringify(obj, null, 4))
+
+    const ENV = { VITE_CONTEXT7_API_KEY: 'ctx7sk-real-key-value' }
+
+    test('refuses a template whose mcpServers key is typo\'d, leaving the output intact', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+        const before = readFileSync(join(dir, '.mcp.json'), 'utf8')
+
+        writeTpl({ mcpSevrers: CLEAN_TEMPLATE.mcpServers })
+        assert.throws(() => build({ cwd: dir, env: ENV, logger: () => {} }), /Refusing to build/)
+
+        assert.equal(readFileSync(join(dir, '.mcp.json'), 'utf8'), before, 'output must be untouched')
+    })
+
+    test('a refused build reports no removals it did not make', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        const messages = []
+        writeTpl({ mcpSevrers: CLEAN_TEMPLATE.mcpServers })
+        assert.throws(() => build({ cwd: dir, env: ENV, logger: (m) => messages.push(m) }))
+
+        assert.equal(
+            messages.filter((m) => m.includes('Removed server')).length,
+            0,
+            'the guard must fire before merge() logs deletions the build then refuses to make'
+        )
+    })
+
+    test('refuses an explicitly emptied template', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        writeTpl({ mcpServers: {} })
+        assert.throws(() => build({ cwd: dir, env: ENV, logger: () => {} }), /Refusing to build/)
+    })
+
+    test('the backup holds a removed key for exactly one write, as documented', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        const trimmed = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
+        delete trimmed.mcpServers.context7
+        writeTpl(trimmed)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        // Immediately after the removal the key is still recoverable...
+        assert.match(readFileSync(join(dir, '.mcp.json.backup'), 'utf8'), /ctx7sk-real-key-value/)
+
+        // ...but the next build that writes anything flushes the rolling slot. This is
+        // the documented limit of the safety net, pinned so the docs cannot drift from it.
+        const edited = JSON.parse(JSON.stringify(trimmed))
+        edited.mcpServers['laravel-boost'].args = ['artisan', 'boost:mcp', '--verbose']
+        writeTpl(edited)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        assert.doesNotMatch(readFileSync(join(dir, '.mcp.json.backup'), 'utf8'), /ctx7sk-real-key-value/)
+    })
+
+    test('a no-op build does not flush the backup', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        const trimmed = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
+        delete trimmed.mcpServers.context7
+        writeTpl(trimmed)
+        build({ cwd: dir, env: ENV, logger: () => {} })
+
+        assert.equal(build({ cwd: dir, env: ENV, logger: () => {} }).status, 'unchanged')
+        assert.match(readFileSync(join(dir, '.mcp.json.backup'), 'utf8'), /ctx7sk-real-key-value/)
+    })
+
+    test('a skipped build still reports the documented result shape', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        const res = build({ cwd: dir, env: { ...ENV, MCP_DYNAMIC: 'false' }, logger: () => {} })
+        assert.equal(res.status, 'skipped')
+        assert.deepEqual(res.removed, [], 'removed is always present, per BuildResult')
+        assert.ok(res.output, 'output is always present, per BuildResult')
+    })
+
+    test('build() reports removals in its return value', () => {
+        writeTpl(CLEAN_TEMPLATE)
+        assert.deepEqual(build({ cwd: dir, env: ENV, logger: () => {} }).removed, [])
+
+        const trimmed = JSON.parse(JSON.stringify(CLEAN_TEMPLATE))
+        delete trimmed.mcpServers.context7
+        writeTpl(trimmed)
+
+        const res = build({ cwd: dir, env: ENV, logger: () => {} })
+        assert.equal(res.status, 'written')
+        assert.deepEqual(res.removed, ['context7'], 'removals must be inspectable without scraping logs')
     })
 })
