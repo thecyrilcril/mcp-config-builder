@@ -20,8 +20,8 @@
         "./secrets": "./src/lib/secrets.js"
     },
     "bin": {
-        "mcp-build": "./src/bin/mcp-build.js",
-        "mcp-watch": "./src/bin/mcp-watch.js"
+        "mcp-build": "src/bin/mcp-build.js",
+        "mcp-watch": "src/bin/mcp-watch.js"
     },
     "files": [
         "src",
